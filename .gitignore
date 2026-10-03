@@ -1,0 +1,14 @@
+# Abhaengigkeiten
+node_modules/
+
+# Logs / Temp
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,45 @@
+{
+  "name": "@openchamberrouter/router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Anbieter-Katalog mit Multi-Account-Routing fuer OpenChamber",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=1.22.0"
+    },
+    "contributes": {
+      "panel": {
+        "id": "openchamber-router",
+        "name": "Router",
+        "icon": "shuffle",
+        "entry": "panel/index.html"
+      },
+      "page": {
+        "entry": "page/index.html",
+        "title": "OpenChamber Router"
+      },
+      "capabilities": [
+        "sessions"
+      ],
+      "filesystem": [
+        "~/.config/opencode/opencode.json",
+        "~/.config/opencode/opencode.jsonc"
+      ],
+      "service": {
+        "entry": "service/main.mjs",
+        "runtime": "host"
+      }
+    }
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "^2.1.0",
+    "@types/node": "^26.6.3",
+    "typescript": "^5.9.3"
+  }
+}
