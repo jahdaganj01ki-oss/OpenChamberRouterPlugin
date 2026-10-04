@@ -24,7 +24,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: TypeScript Typecheck
         run: npx tsc --noEmit
@@ -48,56 +48,20 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+
+      - name: Show Node version and test files
+        run: |
+          node --version
+          echo "=== Test files ==="
+          find . -name "*.test.*" -not -path "./node_modules/*" 2>/dev/null || true
 
       - name: Run tests
-        run: npm test
+        run: npm test 2>&1 | tee test-output.txt
 
-      - name: Debug test failure
-        if: failure()
-        run: |
-          echo "=== Node version ==="
-          node --version
-          echo "=== npm version ==="
-          npm --version
-          echo "=== Test files found ==="
-          find test -name "*.test.*" 2>/dev/null
-          echo "=== Running tests with verbose output ==="
-          npm test 2>&1 || true
-          echo "=== Package-lock tsx check ==="
-          ls node_modules/.bin/tsx 2>/dev/null || echo "tsx not found in .bin"
-
-  release:
-    name: Publish Extension
-    runs-on: windows-latest
-    needs: [typecheck-and-build, test]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build (Windows)
-        run: npm run build
-
-      - name: Upload extension artifacts
+      - name: Upload test output
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: openchamber-router-extension
-          path: |
-            page/
-            panel/
-            service/
-            package.json
-            openchamber.patch.yml
-          if-no-files-found: error
-          retention-days: 30
+          name: test-output
+          path: test-output.txt
