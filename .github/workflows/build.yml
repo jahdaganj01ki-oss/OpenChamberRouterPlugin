@@ -50,18 +50,41 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Show Node version and test files
-        run: |
-          node --version
-          echo "=== Test files ==="
-          find . -name "*.test.*" -not -path "./node_modules/*" 2>/dev/null || true
-
       - name: Run tests
-        run: npm test 2>&1 | tee test-output.txt
+        run: npm test
 
-      - name: Upload test output
-        if: always()
+  release:
+    name: Publish Extension
+    runs-on: windows-latest
+    needs: [typecheck-and-build, test]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (Windows)
+        run: npm run build
+
+      - name: Upload extension artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: test-output
-          path: test-output.txt
+          name: openchamber-router-extension
+          path: |
+            page/
+            panel/
+            service/
+            package.json
+            openchamber.patch.yml
+            Logos-einheitlich-weiss/
+          if-no-files-found: error
+          retention-days: 30
