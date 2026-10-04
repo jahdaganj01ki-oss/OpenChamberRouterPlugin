@@ -27,13 +27,17 @@ interface AdaptersAnswer {
 const answer = (): AdaptersAnswer => ({
   ready: ['openrouter', ...Object.keys(oauthAdapters)],
   oauth: Object.keys(oauthAdapters),
-  models: { openrouter: true, copilot: true },
+  models: { openrouter: true, copilot: true, 'grok-cli': true, 'gemini-cli': true },
 })
 
 test('der Dienst nennt seine Anmelde-Anbieter', () => {
   const a = answer()
   assert.ok(a.oauth.includes('copilot'), 'copilot muss als anmeldefähig gelten')
   assert.ok(a.ready.includes('copilot'), 'copilot muss bedient werden')
+  assert.ok(a.oauth.includes('grok-cli'), 'grok-cli muss als anmeldefähig gelten')
+  assert.ok(a.ready.includes('grok-cli'), 'grok-cli muss bedient werden')
+  assert.ok(a.oauth.includes('gemini-cli'), 'gemini-cli muss als anmeldefähig gelten')
+  assert.ok(a.ready.includes('gemini-cli'), 'gemini-cli muss bedient werden')
 })
 
 test('jeder OAuth-Anbieter im Katalog ist wirklich anmeldefähig verdrahtet', () => {
@@ -41,14 +45,14 @@ test('jeder OAuth-Anbieter im Katalog ist wirklich anmeldefähig verdrahtet', ()
   // Anmeldung. Fehlt der Adapter, muss die Oberflaeche das sagen – und das
   // kann nur der Dienst melden.
   const oauthIds = providers.filter((p) => p.auth === 'oauth').map((p) => p.id)
-  const verdrahtet = new Set(oauthIds)
   const a = answer()
 
-  // Nur Copilot ist gebaut. Die anderen sind als geplant gekennzeichnet.
-  const fehlend = [...verdrahtet].filter((id) => !a.oauth.includes(id))
-  assert.ok(
-    fehlend.length > 0,
-    'es gibt OAuth-Anbieter ohne Geraetefluss – die Oberflaeche muss darauf hinweisen',
+  // Alle OAuth-Provider (copilot, grok-cli, gemini-cli) sind implementiert.
+  const fehlend = oauthIds.filter((id) => !a.oauth.includes(id))
+  assert.deepEqual(
+    fehlend,
+    [],
+    'Diese OAuth-Provider fehlen im Dienst: ' + fehlend.join(', '),
   )
 })
 

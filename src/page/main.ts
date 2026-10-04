@@ -447,10 +447,67 @@ const connectionRow = (
       ? `Zuletzt genutzt ${new Date(connection.lastUsedAt).toLocaleString('de-DE')}`
       : 'Noch nicht genutzt'
 
+  // Quota-Anzeige, falls bekannt
+  const quotaInfo = connection.quota
+  if (quotaInfo && (quotaInfo.used !== undefined || quotaInfo.limit !== undefined)) {
+    const quotaText = el('div')
+    quotaText.style.cssText = 'font-size:11px;opacity:0.55;margin-top:2px'
+    const remaining =
+      quotaInfo.limit !== undefined && quotaInfo.used !== undefined
+        ? quotaInfo.limit - quotaInfo.used
+        : 'unbekannt'
+    const resetStr = quotaInfo.resetsAt
+      ? ` · Reset: ${new Date(quotaInfo.resetsAt).toLocaleTimeString('de-DE')}`
+      : ''
+    quotaText.textContent = `Quota: ${remaining} von ${quotaInfo.limit ?? '?'} verbleibend${resetStr}`
+    if (quotaInfo.exhausted) {
+      quotaText.textContent += ' (erschöpft)'
+    }
+    detail.append(quotaText)
+  }
+
   left.append(title, detail)
 
   const actions = el('div')
   actions.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap'
+
+  // Prioritäts-Buttons: für die `manual`-Strategie, die die
+  // Verbindung mit der niedrigsten Priorität wählt.
+  const connIndex = runtime.connections.indexOf(connection)
+  if (connIndex > 0) {
+    addButton(actions, {
+      label: '↑',
+      variant: 'ghost',
+      size: 'sm',
+      onClick: () => {
+        void (async () => {
+          const swapWith = runtime.connections[connIndex - 1]
+          if (!swapWith) return
+          await call('PATCH', `/connections/${connection.id}`, { priority: swapWith.priority })
+          await call('PATCH', `/connections/${swapWith.id}`, { priority: connection.priority })
+          state = await refreshState()
+          onChanged()
+        })()
+      },
+    })
+  }
+  if (connIndex < runtime.connections.length - 1) {
+    addButton(actions, {
+      label: '↓',
+      variant: 'ghost',
+      size: 'sm',
+      onClick: () => {
+        void (async () => {
+          const swapWith = runtime.connections[connIndex + 1]
+          if (!swapWith) return
+          await call('PATCH', `/connections/${connection.id}`, { priority: swapWith.priority })
+          await call('PATCH', `/connections/${swapWith.id}`, { priority: connection.priority })
+          state = await refreshState()
+          onChanged()
+        })()
+      },
+    })
+  }
 
   addButton(actions, {
     label: 'Testen',
@@ -696,6 +753,7 @@ const anmeldungStarten = (
       verificationUri: string
       userCode: string
       intervalMs?: number
+      pkce?: boolean
     }>('POST', '/oauth/start', { providerId: provider.id })
 
     if (!reply.ok) {
@@ -706,6 +764,8 @@ const anmeldungStarten = (
       return
     }
 
+    const isPkce = reply.data.pkce === true
+
     watch = {
       providerId: provider.id,
       sessionId: reply.data.sessionId,
@@ -713,8 +773,10 @@ const anmeldungStarten = (
         state: 'pending',
         userCode: reply.data.userCode,
         verificationUri: reply.data.verificationUri,
-        lastEvent: 'Warte auf Bestätigung im Browser…',
-        intervalMs: reply.data.intervalMs,
+        lastEvent: isPkce
+          ? 'Öffne die URL im Browser, bestätige die Anmeldung. Warte auf Callback.'
+          : 'Warte auf Bestätigung im Browser…',
+        intervalMs: reply.data.intervalMs ?? 2000,
         expiresAt: Date.now() + 15 * 60_000,
       },
       lastAskedAt: 0,
@@ -722,6 +784,8 @@ const anmeldungStarten = (
       polls: 0,
     }
     horcher?.(watch.last)
+    // PKCE Flows polten immer noch – der Service aktualisiert den Status, wenn
+    // der Callback-Server den Code empfangen hat.
     taktStarten()
     void onChanged()
 
@@ -903,6 +967,19 @@ const renderDetail = (provider: Provider): HTMLElement => {
 
   wrap.append(section(heading('Multi-Account-Routing', 'md'), strategyBox))
 
+  // Strategie-Hinweis: erklärt, welche Verbindung ausgewählt wird.
+  const activeStrategy = runtime?.strategy ?? state?.globalStrategy ?? 'round-robin'
+  const stratHint = el('p')
+  stratHint.style.cssText = 'font-size:12px;opacity:0.6;margin:0 0 14px'
+  const stratLabels: Record<AccountStrategy, string> = {
+    manual: 'Erste gesunde Verbindung (Prioritätssortierung)',
+    failover: 'Erste gesunde Verbindung; deaktiviert bei Fehlern',
+    'round-robin': 'Rotation pro Anfrage',
+    'quota-aware': 'Verbindung mit höchster verbleibender Quote',
+  }
+  stratHint.textContent = `Strategie: ${stratLabels[activeStrategy] ?? activeStrategy}. Nutze ↑/↓ um die Priorität zu ändern.`
+  wrap.append(stratHint)
+
   // --- Verbindungen ---
   const connBox = el('div')
   const listHost = el('div')
@@ -938,7 +1015,8 @@ const renderDetail = (provider: Provider): HTMLElement => {
   // Hinweis, wohin es stattdessen geht.
   const takesSecret =
     provider.auth !== 'none' && provider.auth !== 'oauth'
-  if (takesSecret) {
+  const takesCookie = provider.auth === 'cookie'
+  if (takesSecret && !takesCookie) {
     addTextField(form, {
       label: 'API-Schlüssel',
       value: '',
@@ -948,6 +1026,35 @@ const renderDetail = (provider: Provider): HTMLElement => {
         secretValue = value
       },
     })
+    // Für lokale Provider: Hinweis, dass der Service Credentials aus
+    // lokalen Dateien automatisch lesen kann.
+    if (provider.auth === 'local') {
+      const localHint = el('p')
+      localHint.style.cssText = 'font-size:12px;opacity:0.6;margin:0 0 8px'
+      localHint.textContent =
+        'Lässt du das Feld leer, scannt der Service automatisch ' +
+        'lokale Credentials (~/.aws/credentials, ~/.codeium/windsurf/, ~/.qoder/). ' +
+        'Ein manueller Schlüssel hat Vorrang.'
+      form.append(localHint)
+    }
+  } else if (takesCookie) {
+    addTextField(form, {
+      label: 'Cookies',
+      value: '',
+      placeholder: 'z. B. __Host-Stripe-key=...',
+      password: true,
+      onChange: (value) => {
+        secretValue = value
+      },
+    })
+    const cookieHint = el('p')
+    cookieHint.style.cssText = 'font-size:12px;opacity:0.6;margin:0 0 8px'
+    cookieHint.innerHTML =
+      'Kopiere die Session-Cookies aus dem Browser (Entwicklerwerkzeuge' +
+      ' → Application → Cookies). Der Schlüssel bleibt nur im lokalen Dienst.' +
+      '<br><br>Alternativ: <code>npm run crawl-cookies -- ' + provider.id +
+      '</code> startet einen Browser, der dir die Cookies automatisch extrahiert.'
+    form.append(cookieHint)
   } else {
     const hinweis = el('p')
     hinweis.style.cssText = 'font-size:13px;opacity:0.75;margin:0 0 8px'

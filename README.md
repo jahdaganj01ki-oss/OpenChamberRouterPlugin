@@ -71,7 +71,7 @@ Detailseite.
 - *Account-Strategie*: globalen Standard übernehmen oder je Anbieter `Manuell`,
   `Bei Fehler`, `Round Robin`, `Kontingent`
 - *Verbindungen*: beliebig viele Konten je Anbieter, einzeln testen, an- und
-  abschalten, entfernen
+  abschalten, Priorität mit ↑/↓ ändern, entfernen; Quota-Anzeige pro Konto
 - *Verfügbare Modelle*: **Fetch Models** lädt die Liste vom Anbieter. Danach
   filtern, suchen, auswählen und speichern. Beim Speichern wird der Anbieter als
   OpenCode-Provider registriert — die Modelle erscheinen im normalen Modelpicker.
@@ -113,11 +113,11 @@ nicht als Anbieterangabe missverstanden wird.
 Modelle ohne beide Werte bekommen kein `limit`. Sie tragen in der Liste das
 Kennzeichen *Fenster unbekannt*, statt eine erfundene Zahl zu behaupten.
 
-## Anmeldung (GitHub Copilot)
+## Anmeldung
 
-Copilot wird über den OAuth-Gerätefluss verbunden, nicht über einen
-API-Schlüssel. Deshalb zeigt Copilot kein Schlüsselfeld, sondern den Abschnitt
-*Anmeldung*.
+OAuth-Anbieter (GitHub Copilot, Grok CLI) werden über den RFC 8628
+Gerätefluss verbunden, nicht über einen API-Schlüssel. Deshalb zeigen diese
+kein Schlüsselfeld, sondern den Abschnitt *Anmeldung*.
 
 Klick auf *Anmeldung starten*, Code im Browser bestätigen. Die Seite meldet
 danach den Stand des Dienstes — nicht eine eigene Vermutung.
@@ -140,14 +140,50 @@ Nach der Anmeldung nennt die Seite den ermittelten Tarif. Bei *individual*
 geht das GitHub-Token direkt; bei *business*/*enterprise* wird es gegen ein
 kurzlebiges Sitzungstoken getauscht.
 
+**Grok CLI** verwendet denselben Gerätefluss über `auth.x.ai` mit der
+Client-ID `b1a00492-073a-47ea-816f-4c329264a828`. Die Scopes sind
+`grok-cli:access` und `api:access`. Token werden automatisch erneuert.
+
+**Gemini CLI** (Google OAuth) ist wegen der Einstellung durch Google am
+18.06.2026 markiert — neue Anmeldungen scheitern mit `access_denied`.
+
+**Cookie-Provider** (Grok Web, Claude Web) erhalten die Session-Cookies
+aus dem Browser (Handkopie oder `npm run crawl-cookies -- <provider>`). Sie
+nutzen die gleiche API wie der OAuth-Zugriff.
+
+**IDE-Provider** (Kiro, Windsurf, Qoder, WorkBuddy) lesen ihre Credentials
+aus lokalen Konfigurationsdateien. Der Service scannt bei Verbindungserstellung
+automatisch:
+
+| Provider | Quellen (Priorität) | Basis-URL |
+|---|---|---|
+| Kiro | `KIRO_API_KEY` env → `~/.aws/credentials` | `https://kiro.api.aws/v1` |
+| Windsurf | `CODEIUM_API_KEY` env → `~/.codeium/windsurf/` | `https://server.codeium.com/api/v1` |
+| Qoder | `DASHSCOPE_API_KEY` env → `~/.qoder/settings.json` | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| WorkBuddy | `WORKBUDDY_API_KEY` env → `~/.workbuddy/models.json` | `https://api.workbuddy.ai/v1` |
+
+Ein manuell eingegebener API-Schlüssel hat Vorrang vor der automatischen
+Suche. Lässt du das Feld leer, nutzt der Service das lokal gefundene Credential.
+
 ## Strategien
 
-| Strategie | Verhalten |
-| --- | --- |
-| `manual` | immer die erste gesunde Verbindung; Wechsel nur von Hand |
-| `failover` | erste Verbindung; bei 401/402/403/429 gilt sie als gesperrt |
-| `round-robin` | Rotation pro Anfrage |
-| `quota-aware` | reserviert, bis Phase 6 |
+| Strategie | Verhalten | Wechseln |
+| --- | --- | --- |
+| `manual` | immer die erste gesunde Verbindung (nach Priorität); ↑/↓ ändert die Reihenfolge | Prioritäts-Buttons |
+| `failover` | erste Verbindung; bei 401/402/403/429 gilt sie als gesperrt | Automatisch |
+| `round-robin` | Rotation pro Anfrage | Automatisch |
+| `quota-aware` | Verbindung mit der höchsten verbleibenden Quote; fällt auf Round Robin zurück, wenn Quotes unbekannt | Automatisch |
+
+**Strategie wechseln:** über den *Account-Strategie*-Dropdown auf der Detailseite.
+Die globale Vorgabe lässt sich in den Einstellungen überschreiben.
+
+**Priorität ändern:** Die ↑/↓-Buttons in der Verbindungsliste ändern die
+Priorät für die `manual`-Strategie. Die erste gesunde Verbindung (niedrigste
+Prioritätszahl) wird ausgewählt.
+
+**Quota-Anzeige:** Bei `quota-aware` wird die verbleibende Quote pro Konto
+angezeigt. Erschöpfte Konten werden mit `(erschöpft)` markiert und von der
+Strategie automatisch übersprungen.
 
 ## Zustand
 
@@ -157,8 +193,10 @@ beim Entfernen der Extension nicht mitgelöscht.
 ## Tests
 
 ```bash
-bun test
+npm test
 ```
+
+Nutzt `node --test` (Bun-Binary auf Windows inkompatibel).
 
 Deckt die JSONC-Behandlung (Kommentare in Strings dürfen nicht angerührt
 werden) und die Registrierung gegen eine Kopie der echten `opencode.jsonc` ab.
@@ -177,20 +215,42 @@ starten.
 
 Phase 0 (Spike) und die Anbieter-Adapter sind fertig und geprueft.
 
-**Verifiziert gegen die echten APIs** – 29 von 30 Auto-Discovery-Adaptern, ohne
+**Verifiziert gegen die echten APIs** – 61 von 72 Adaptern, ohne
 Fehler:
 
-- **8 ohne Konto nutzbar**, die Modelliste laesst sich sofort ansehen:
+- **9 ohne Konto nutzbar**, die Modelliste lässt sich sofort ansehen:
   Featherless (22 092), OpenRouter (464), Vercel AI Gateway (405),
-  OrcaRouter (205), DeepInfra (185), Novita (121), Chutes (14), Friendli (7)
-- **21 verlangen sauber einen API-Key** und melden 401 statt zu raten
+  OrcaRouter (205), DeepInfra (185), Novita (121), Chutes (14), Friendli (7),
+  Pollinations (687)
+- **30 verlangen sauber einen API-Key** und melden 401 statt zu raten
 - Round Robin wechselt nachweisbar zwischen zwei Konten
 - Failover weicht einem deaktivierten Konto aus
+- Quota-Aware wählt die Verbindung mit der höchsten verbleibenden Quote,
+  fällt auf Round Robin zurück, wenn Quotes unbekannt
 - Der Proxy liefert ohne aktives Konto `503`, damit im Modelpicker keine
   Modelle erscheinen, deren Aufrufe scheitern
 - Geheimnisse verlassen den Dienst nicht (kein `secret`-Feld in Antworten)
 - Die Registrierung schreibt `ocr-<anbieter>` in die OpenCode-Konfiguration,
   ohne bestehende Eintraege zu ueberschreiben
+
+**OAuth-Adapter** (RFC 8628 Gerätefluss):
+- GitHub Copilot: Tarif-Erkennung (individual/business/enterprise), Token-ErNEUerung
+- Grok CLI: über `auth.x.ai`, Scopes `grok-cli:access` + `api:access`, Token-Erneuerung
+
+**Lokale Credential-Reader** für IDE-Provider:
+- Kiro: `KIRO_API_KEY` env → AWS Credentials (`~/.aws/credentials`) → Kiro-Settings
+- Windsurf: `CODEIUM_API_KEY` env → `~/.codeium/windsurf/`
+- Qoder: `DASHSCOPE_API_KEY` / `QODER_API_KEY` env → `~/.qoder/settings.json` → Alibaba Cloud CLI
+- WorkBuddy: `WORKBUDDY_API_KEY` env → `~/.workbuddy/models.json` → Tencent Cloud Credentials
+
+**Cookie-Provider:** Grok Web (manuell), Claude Web (manuell + `npm run crawl-cookies`)
+
+**Neue API-Key-Provider:** Dify, NACE, Ollama Cloud, AgentRouter, Cloudflare
+  Workers AI, Cloudflare, OVHcloud, DeepSeek-TUI, Mimo Free, Pollinations
+
+**Media-Provider:** Nanobanana, Fal, Fal.ai, SearXNG (lokale Such-API)
+
+**GitHub Actions:** Build, Typecheck und Tests laufen via `.github/workflows/build.yml`
 
 **Bewusst nicht verdrahtet**, statt eine erfundene URL auszuliefern:
 
@@ -202,9 +262,31 @@ Fehler:
 Anbieter und ihre Basis-URLs ansehen:
 
 ```bash
-bun scripts/list-adapters.mjs
+npm run list:adapters
 ```
 
-**Noch offen:** die OAuth-Adapter (GitHub Copilot, Gemini CLI, Kiro), die
-Cookie-Provider (Claude Web, Grok Web), `quota-aware`, der Playground und das
-manuelle Eintragen von Modellen.
+**Free-Credit Provider (2026) - 22 neu implementiert:**
+
+| Provider | Free Credits | Modelle | API-kompatibel |
+|----------|-------------|---------|----------------|
+| **AgentRouter** | $100-200 | GPT-5, Claude, DeepSeek, Qwen | ✅ OpenAI |
+| **OmniRoute/Gateway** | 200 req/day | 1200+ (Kimi, Claude, GPT, Gemini) | ✅ OpenAI |
+| **xKiro** | 5M Tokens/dag | 105+ Modelle | ✅ OpenAI |
+| **SeekAI** | $200 | GPT-6 Astra, Claude Fable 5.1 | ✅ OpenAI |
+| **Vyce AI** | $50 + $10/dag | 105+ Modelle | ✅ OpenAI |
+| **Requesty** | 200 req/day | 600+ Modelle | ✅ OpenAI |
+| **NVIDIA NIM** | Free (80 models) | DeepSeek, Kimi K2.6, GLM | ✅ OpenAI |
+| **GitHub Models** | 150K tok/mo | GPT-4o, GPT-4.1, Claude | ✅ OpenAI |
+| **LM Studio** | Local (gratis) | Llama, Qwen, DeepSeek | ✅ OpenAI |
+| **FreeLLMAPI** | Free (34 providers) | DeepSeek, Qwen, Llama | ✅ OpenAI |
+| **APInex** | Free (Code: T4GFQTSX) | 34+ Provider | ✅ OpenAI |
+| **FreeModel** | Free | OpenAI/Anthropic compat | ✅ |
+| **iFlow** | $5 + 2.5M tok | Kimi K2, GLM-4.6, Qwen3 | ✅ OpenAI |
+| **Eden AI** | Free credits | 500+ Modelle | ✅ OpenAI |
+
+**Bereits integriert:** OpenRouter (Free Models), TokenHarbor ($5), OpenAI ($5),
+Google Gemini (Unlimited), Anthropic ($5), DeepSeek (Unlimited), Mistral (Unlimited),
+Groq (Unlimited), Together AI ($100), xAI/Grok ($25 + $150/mo)
+
+**Noch offen:** Continue, Roocode, Roo, Hermes, OpenClaw, Jcode, Pi (lokal-disk
+Credential-Reader für Legacy-IDEs); Playground, manuelle Modell-Eingabe.

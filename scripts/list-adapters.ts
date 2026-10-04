@@ -2,7 +2,8 @@
  * Listet alle verdrahteten Anbieter mit Basis-URL und der Angabe, ob sie ihre
  * Modelliste selbst abrufen koennen.
  *
- *   bun scripts/list-adapters.mjs
+ *   npm run list:adapters
+ *   bun scripts/list-adapters.ts
  *
  * Damit laesst sich pruefen, ob eine Basis-URL ueberhaupt stimmt:
  *

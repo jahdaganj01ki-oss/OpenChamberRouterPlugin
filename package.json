@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "watch": "node scripts/build.mjs --watch"
+    "watch": "node scripts/build.mjs --watch",
+    "list:adapters": "tsx scripts/list-adapters.ts",
+    "crawl-cookies": "node scripts/crawl-cookies.mjs",
+    "test": "node --test"
   },
   "openchamber": {
     "apiVersion": 1,
@@ -40,6 +43,10 @@
   "devDependencies": {
     "@openchamber/sdk": "^2.1.0",
     "@types/node": "^26.6.3",
+    "sharp": "^0.35.5",
     "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "playwright": "^1.58.0"
   }
 }

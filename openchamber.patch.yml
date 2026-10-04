@@ -1,0 +1,7 @@
+# OpenChamber Extension Manifest
+# Wird vom Host gelesen, um die Extension einzubinden.
+name: OpenChamber Router
+description: Anbieter-Katalog mit Multi-Account-Routing fuer OpenChamber
+version: 0.2.0
+entry: service/main.mjs
+runtime: host

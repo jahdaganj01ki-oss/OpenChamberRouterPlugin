@@ -13,6 +13,8 @@ import { createServer } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
+
+import { readLocalCredentials } from './local-credentials.ts'
 import { join } from 'node:path'
 
 import { adapters, adapterFor, type Adapter } from './adapters.ts'
@@ -20,20 +22,27 @@ import { baseHeaders } from './http.ts'
 import { anreichern } from './model-meta.ts'
 import {
   copilotDeviceFlow,
+  geminiPkceFlow,
+  generatePkce,
+  pkceAuthUrl,
+  exchangePkcCode,
+  grokDeviceFlow,
   pollDecision,
   pollDeviceFlow,
+  type PkceFlowConfig,
   resolveCopilot,
   startDeviceFlow,
   type OAuthSession,
 } from './oauth.ts'
 import { verarbeiteAntwort } from './oauth-session.ts'
-import { oauthAdapterFor, oauthAdapters, renewCopilot, freshToken } from './oauth-adapters.ts'
+import { oauthAdapterFor, oauthAdapters, renewCopilot, renewGrok, freshToken } from './oauth-adapters.ts'
 import type {
   AccountStrategy,
   Connection,
   ConnectionStatus,
   ModelInfo,
   ProviderRuntime,
+  Quota,
   ServiceState,
 } from '../shared/contract.ts'
 
@@ -46,16 +55,127 @@ const VERSION = '0.2.0'
  */
 const sessions = new Map<string, OAuthSession>()
 
+/** PKCE-Token, die der Callback-Server empfangen hat (nur im Speicher). */
+const pkceTokens = new Map<
+  string,
+  { accessToken: string; refreshToken?: string; expiresAt: number }
+>()
+
 /** Anbieter, bei denen wir den Geraetefluss selbst fahren. */
 const deviceFlowFor = (providerId: string) => {
   if (providerId === 'copilot') return copilotDeviceFlow
+  if (providerId === 'grok-cli') return grokDeviceFlow
   return undefined
+}
+
+/** PKCE-Flows: brauchen einen lokalen Callback-Server statt Device-Polling. */
+const pkceFlowFor = (providerId: string) => {
+  if (providerId === 'gemini-cli') return geminiPkceFlow
+  return undefined
+}
+
+/**
+ * Startet einen lokalen Callback-Server für den PKCE Flow.
+ *
+ * Der Server lauscht auf `127.0.0.1:port` und fängt den Authorization-Code
+ * ab, den Google nach der Browser-Anmeldung sendet. Nach dem Tausch
+ * gegen Tokens wird die Session auf `done` gesetzt.
+ *
+ * Der Server wird automatisch nach dem ersten Callback oder nach einem
+ * Timeout (30 Sekunden) wieder geschlossen.
+ */
+const startPkceCallback = (
+  flow: PkceFlowConfig,
+  pkce: { codeVerifier: string; codeChallenge: string },
+  sessionId: string,
+): void => {
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname !== '/callback') {
+      res.writeHead(404)
+      res.end('Not found')
+      return
+    }
+
+    const code = url.searchParams.get('code')
+    const error = url.searchParams.get('error')
+
+    if (error) {
+      const errDesc = url.searchParams.get('error_description') ?? error
+      sessions.set(sessionId, {
+        ...sessions.get(sessionId)!,
+        state: 'denied',
+        error: errDesc,
+        lastEvent: `Anmeldung abgelehnt: ${errDesc}`,
+      })
+      res.writeHead(400)
+      res.end('Anmeldung abgelehnt.')
+      server.close()
+      return
+    }
+
+    if (code) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end('Anmeldung erfolgreich! Fenster kann geschlossen werden.')
+
+      // Asynchron Token-Tausch (ausserhalb des Response-Streams)
+      void (async () => {
+        try {
+          const token = await exchangePkcCode(flow, code, pkce.codeVerifier)
+
+          pkceTokens.set(sessionId, {
+            accessToken: token.accessToken,
+            refreshToken: token.refreshToken,
+            expiresAt: token.expiresAt,
+          })
+
+          sessions.set(sessionId, {
+            ...sessions.get(sessionId)!,
+            state: 'done',
+            deviceCode: undefined,
+            lastEvent: 'Token erhalten, Konto wird angelegt...',
+          })
+          // Speichere den Token-Status für die Session
+          await save()
+        } catch (err) {
+          sessions.set(sessionId, {
+            ...sessions.get(sessionId)!,
+            state: 'error',
+            error: err instanceof Error ? err.message : String(err),
+            lastEvent: `Token-Tausch fehlgeschlagen: ${err instanceof Error ? err.message : String(err)}`,
+          })
+          await save()
+        } finally {
+          server.close()
+        }
+      })()
+    } else {
+      res.writeHead(400)
+      res.end('Kein Code erhalten.')
+      server.close()
+    }
+  })
+
+  const port = Number(new URL(flow.redirectUri).port)
+  server.listen(port, '127.0.0.1')
+
+  // Timeout: Schließe nach 30 Sekunden, wenn kein Callback kommt.
+  setTimeout(() => {
+    if (!server.listening) return
+    server.close()
+  }, 30_000)
 }
 const DEFAULT_STRATEGY: AccountStrategy = 'round-robin'
 
 interface StoredConnection extends Connection {
   /** Geheimnis des Accounts. Bleibt hier, kommt nie in eine Antwort. */
   secret: string
+  /**
+   * Woher das Secret stammt – wichtig für `local` Provider, die ihr
+   * Credential aus einer lokalen Datei gelesen haben. Wird nicht im
+   * Proxy verwendet, nur für Diagnose und UI-Hinweis.
+   */
+  authSource?: string
   /**
    * Zustaende aus einer Anmeldung. Bei OAuth genuegt ein einzelner Schluessel
    * nicht: der Dienst braucht Host, Plan und Ablaufzeit, sonst kann er den
@@ -148,12 +268,16 @@ const publicState = (port: number): ServiceState => ({
 })
 
 /**
- * Waehlt die naechste Verbindung nach der Strategie des Providers.
+ * Wählt die nächste Verbindung nach der Strategie des Providers.
  *
- * `manual` heisst: immer die erste gesunde Verbindung in Prioritaetsordnung –
+ * `manual` heißt: immer die erste gesunde Verbindung in Prioritätssordnung –
  * der Nutzer sortiert also von Hand. `failover` nimmt ebenfalls die erste,
- * markiert sie aber bei Fehlern als ungesund. `round-robin` zaehlt weiter,
- * faellt aber auf die erste zurueck, wenn nur eine uebrig ist.
+ * markiert sie aber bei Fehlern als ungesund. `round-robin` zählt weiter,
+ * fällt aber auf die erste zurück, wenn nur eine übrig ist.
+ *
+ * `quota-aware` wählt die Verbindung mit der höchsten verbleibenden Quote.
+ * Wenn die Quote unbekannt ist, fällt sie zurück auf round-robin – eine
+ * erzwonnene Nummer ist schlimmer als eine faire Rotation.
  */
 const pickConnection = (providerId: string): StoredConnection | null => {
   const entry = state.providers[providerId]
@@ -163,6 +287,30 @@ const pickConnection = (providerId: string): StoredConnection | null => {
   if (healthy.length === 0) return null
 
   const strategy = entry?.strategy ?? state.globalStrategy
+
+  if (strategy === 'quota-aware') {
+    // Verbindungen mit bekannter, nicht erschöpfter Quote zuerst.
+    const withQuota = healthy.filter((c) => c.quota && !c.quota.exhausted)
+    if (withQuota.length > 0) {
+      // Sortiere nach verbleibender Quote (limit - used), absteigend.
+      // Verbindungen ohne `used` oder `limit` rutschen ans Ende.
+      return (
+        withQuota
+          .map((c) => ({
+            conn: c,
+            remaining:
+              c.quota && c.quota.used !== undefined && c.quota.limit !== undefined
+                ? c.quota.limit - c.quota.used
+                : -1,
+          }))
+          .sort((a, b) => b.remaining - a.remaining)[0]?.conn ??
+        healthy[0] ??
+        null
+      )
+    }
+    // Alle Quotas unbekannt oder erschöpft: auf round-robin zurückfallen.
+  }
+
   if (strategy === 'round-robin' && healthy.length > 1) {
     const cursor = state.cursors[providerId] ?? 0
     state.cursors[providerId] = cursor + 1
@@ -176,12 +324,14 @@ const setStatus = (
   connectionId: string,
   status: ConnectionStatus,
   error?: string,
+  quota?: Quota,
 ): void => {
   const entry = state.providers[providerId]
   const found = entry?.connections.find((c) => c.id === connectionId)
   if (!found) return
   found.status = status
-  found.lastError = error
+  if (error) found.lastError = error
+  if (quota) found.quota = quota
   if (status === 'active') found.lastUsedAt = new Date().toISOString()
 }
 
@@ -191,6 +341,49 @@ const describeError = (error: unknown): string =>
 /** Fehler, die auf ein Konto hindeuten und nicht auf einen Aufruf. */
 const accountError = (status: number): boolean =>
   status === 401 || status === 402 || status === 403 || status === 429
+
+/**
+ * Extrahiert Quota-Informationen aus HTTP-Response-Headern.
+ *
+ * Standard-Rate-Limit-Header (RFC 8291):
+ *   x-ratelimit-remaining: verbleibende Aufrufe
+ *   x-ratelimit-limit:     Gesamtlimit
+ *   x-ratelimit-reset:     Unix-Zeitstempel des Zurücksetzungszeitpunkts
+ *
+ * Nicht alle Anbieter senden alle Header. Fehlende Werte bedeuten
+ * "unbekannt", nicht "unbegrenzt" – das wird bewusst getrennt gehalten.
+ */
+const extractQuota = (headers: Headers): Quota | undefined => {
+  const remaining = headers.get('x-ratelimit-remaining')
+  const limit = headers.get('x-ratelimit-limit')
+  const reset = headers.get('x-ratelimit-reset')
+
+  if (!remaining && !limit && !reset) return undefined
+
+  let used: number | undefined
+  if (limit !== null) {
+    const lim = Number(limit)
+    const rem = remaining !== null ? Number(remaining) : undefined
+    if (Number.isFinite(lim) && Number.isFinite(rem ?? 0)) {
+      used = lim - rem!
+    }
+  }
+
+  let resetsAt: string | undefined
+  if (reset !== null) {
+    const ts = Number(reset)
+    if (Number.isFinite(ts)) {
+      resetsAt = new Date(ts * 1000).toISOString()
+    }
+  }
+
+  return {
+    used,
+    limit: limit !== null ? Number(limit) : undefined,
+    resetsAt,
+    exhausted: remaining !== null && Number(remaining) <= 0,
+  }
+}
 
 const readBody = async (req: import('node:http').IncomingMessage): Promise<string> => {
   const chunks: Buffer[] = []
@@ -284,6 +477,19 @@ const main = async (): Promise<void> => {
           return fail(res, 400, 'NO_ADAPTER', `Kein Adapter fuer ${body.providerId}.`)
         }
         const entry = slot(body.providerId)
+
+        // Für lokale Provider: versuche, Credentials aus lokalen Dateien zu lesen.
+        // Wenn der Nutzer manuell einen Secret eingibt, hat das Vorrang.
+        let secret = body.secret ?? ''
+        let localSource: string | undefined
+        if (adapter.auth === 'local' && !secret) {
+          const creds = await readLocalCredentials(body.providerId)
+          if (creds && creds.apiKey) {
+            secret = creds.apiKey
+            localSource = creds.source
+          }
+        }
+
         const created: StoredConnection = {
           id: randomUUID(),
           providerId: body.providerId,
@@ -291,11 +497,17 @@ const main = async (): Promise<void> => {
           auth: body.auth ?? adapter.auth,
           status: 'active',
           priority: entry.connections.length,
-          secret: body.secret ?? '',
+          secret,
+          ...(localSource ? { authSource: localSource } : {}),
         }
         entry.connections.push(created)
         await save()
-        return json(res, 201, publicRuntime(body.providerId))
+        const runtime = publicRuntime(body.providerId)
+        // Gib das Credential-Quell-Label zurück, falls automatisch gelesen.
+        return json(res, 201, {
+          ...runtime,
+          ...(localSource ? { authSource: localSource } : {}),
+        })
       }
 
       const connMatch = /^\/connections\/([0-9a-f-]+)$/.exec(path)
@@ -444,6 +656,38 @@ const main = async (): Promise<void> => {
         const body = parse<{ providerId?: string; label?: string }>(await readBody(req))
         if (!body?.providerId) return fail(res, 400, 'BAD_BODY', 'providerId fehlt.')
 
+        // PKCE Authorization Code Flow (z.B. Google Gemini CLI).
+        // Statt eines User-Codes starten wir einen lokalen Callback-Server
+        // und geben die Auth-URL zurück – der Nutzer öffnet sie im Browser.
+        const pkceFlow = pkceFlowFor(body.providerId)
+        if (pkceFlow) {
+          try {
+            const pkce = generatePkce()
+            const authUrl = pkceAuthUrl(pkceFlow, pkce)
+            const sessionId = randomUUID()
+
+            sessions.set(sessionId, {
+              id: sessionId,
+              providerId: body.providerId,
+              state: 'pending',
+              verificationUri: authUrl,
+              lastEvent: 'Öffne die URL im Browser, bestätige die Anmeldung.',
+            })
+
+            // Lokalen Callback-Server starten (fängt den Code nach Redirect ab)
+            startPkceCallback(pkceFlow, pkce, sessionId)
+
+            return json(res, 201, {
+              sessionId,
+              verificationUri: authUrl,
+              userCode: undefined,
+              pkce: true,
+            })
+          } catch (error) {
+            return fail(res, 502, 'OAUTH_START_FAILED', describeError(error))
+          }
+        }
+
         const flow = deviceFlowFor(body.providerId)
         if (!flow) {
           return fail(
@@ -514,6 +758,37 @@ const main = async (): Promise<void> => {
         if (session.expiresAt && Date.now() > session.expiresAt && session.state === 'pending') {
           session.state = 'error'
           session.error = 'Zeit abgelaufen. Bitte neu anmelden.'
+        }
+
+        // PKCE Flow: Token wird asynchron über Callback-Server empfangen.
+        // Sobald state === 'done' ist, liegen die Tokens in pkceTokens vor.
+        if (session.state === 'done' && pkceTokens.has(id)) {
+          const pkceToken = pkceTokens.get(id)!
+          pkceTokens.delete(id)
+
+          // Verbindung anlegen
+          const entry = slot(session.providerId)
+          const connection: StoredConnection = {
+            id: randomUUID(),
+            providerId: session.providerId,
+            label: `Google (${session.plan ?? 'OAuth'})`,
+            auth: 'oauth',
+            status: 'active',
+            priority: entry.connections.length,
+            secret: pkceToken.accessToken,
+            oauth: {
+              refreshToken: pkceToken.refreshToken ?? '',
+            },
+          }
+          entry.connections.push(connection)
+          sessions.delete(id)
+          await save()
+
+          return json(res, 200, {
+            ok: true,
+            connectionId: connection.id,
+            label: connection.label,
+          })
         }
 
         const flow = deviceFlowFor(session.providerId)
@@ -623,7 +898,12 @@ const main = async (): Promise<void> => {
         // Anmeldungen laufen oft nach Minuten ab. Lieber vorher erneuern, als
         // den Aufruf wiederholen zu muessen – das merkt der Nutzer als Fehler.
         if (connection.oauth) {
-          const renewer = providerId === 'copilot' ? renewCopilot : undefined
+          const renewer =
+          providerId === 'copilot'
+            ? renewCopilot
+            : providerId === 'grok-cli'
+              ? renewGrok
+              : undefined
           if (renewer && connection.oauth.refreshToken) {
             try {
               const next = await freshToken(connection.oauth, renewer)
@@ -670,11 +950,18 @@ const main = async (): Promise<void> => {
 
         // Ein Konto, das nicht mehr zahlt oder nicht mehr darf, wird still
         // gesperrt, damit der naechste Aufruf ein anderes nimmt.
-        if (accountError(response.status)) {
-          setStatus(providerId, connection.id, 'locked', `Upstream ${response.status}`)
+        // Quota-Header werden ausgewertet, damit die Strategie sie nutzen kann.
+        const quota = extractQuota(response.headers)
+        if (quota?.exhausted) {
+          // 429 mit leerer Quota: das Konto ist erschoepft, nicht defekt.
+          // Es bleibt "active", aber die quota-aware-Strategie meidet es.
+          setStatus(providerId, connection.id, 'active', undefined, quota)
+          await save()
+        } else if (accountError(response.status)) {
+          setStatus(providerId, connection.id, 'locked', `Upstream ${response.status}`, quota)
           await save()
         } else if (response.ok) {
-          setStatus(providerId, connection.id, 'active')
+          setStatus(providerId, connection.id, 'active', undefined, quota)
           await save()
         }
 
