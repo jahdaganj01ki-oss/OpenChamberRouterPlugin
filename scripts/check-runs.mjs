@@ -2,11 +2,10 @@ import https from 'node:https'
 
 const owner = 'jahdaganj01ki-oss'
 const repo = 'OpenChamberRouterPlugin'
-const runId = '37235141143'
 
 const options = {
   hostname: 'api.github.com',
-  path: `/repos/${owner}/${repo}/actions/runs/${runId}/jobs`,
+  path: `/repos/${owner}/${repo}/actions/runs?per_page=3`,
   headers: {
     'User-Agent': 'OpenChamberRouter',
     'Accept': 'application/vnd.github+json'
@@ -18,24 +17,13 @@ https.get(options, res => {
   res.on('data', d => data += d)
   res.on('end', () => {
     const json = JSON.parse(data)
-    const jobs = json.jobs || []
-    jobs.forEach(job => {
-      console.log(`\n=== ${job.name} ===`)
-      console.log('Status:', job.status, 'Conclusion:', job.conclusion)
-      if (job.steps) {
-        job.steps.forEach(step => {
-          const status = step.status || ''
-          const conclusion = step.conclusion || ''
-          const indicator = {
-            success: '✓',
-            failure: '✗',
-            skipped: '⊘',
-            in_progress: '→',
-            pending: '⌛'
-          }[conclusion || status] || '?'
-          console.log(`  ${indicator} ${step.name} - ${status}/${conclusion || '—'}`)
-        })
-      }
+    const runs = json.workflow_runs || []
+    runs.slice(0, 3).forEach(r => {
+      console.log(`\n--- Run #${r.id} ---`)
+      console.log('  SHA:', r.head_sha?.substring(0, 8))
+      console.log('  Status:', r.status)
+      console.log('  Conclusion:', r.conclusion)
+      console.log('  Created:', new Date(r.created_at).toLocaleString())
     })
   })
 }).on('error', err => console.log('Error:', err.message))
