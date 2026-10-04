@@ -9,7 +9,7 @@
     "watch": "node scripts/build.mjs --watch",
     "list:adapters": "tsx scripts/list-adapters.ts",
     "crawl-cookies": "node scripts/crawl-cookies.mjs",
-    "test": "node --test --experimental-strip-types"
+    "test": "tsx --test"
   },
   "openchamber": {
     "apiVersion": 1,
