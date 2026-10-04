@@ -53,6 +53,20 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Debug test failure
+        if: failure()
+        run: |
+          echo "=== Node version ==="
+          node --version
+          echo "=== npm version ==="
+          npm --version
+          echo "=== Test files found ==="
+          find test -name "*.test.*" 2>/dev/null
+          echo "=== Running tests with verbose output ==="
+          npm test 2>&1 || true
+          echo "=== Package-lock tsx check ==="
+          ls node_modules/.bin/tsx 2>/dev/null || echo "tsx not found in .bin"
+
   release:
     name: Publish Extension
     runs-on: windows-latest
