@@ -48,15 +48,19 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Show versions
         run: |
           bun --version
           node --version
+          echo "=== Installed packages ==="
+          ls node_modules/.bin/tsx 2>/dev/null || echo "tsx not in .bin"
 
       - name: Run tests
-        run: bun test test/
+        run: |
+          bun test test/ 2>&1
+          echo "EXIT CODE: $?"
 
   release:
     name: Publish Extension
