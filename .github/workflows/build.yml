@@ -48,9 +48,18 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
-      - name: Run tests
+      - name: Debug: show environment
+        run: |
+          node --version
+          npm --version
+          echo "=== Test files ==="
+          find . -path ./node_modules -prune -o -name "*.test.*" -print
+          echo "=== Try running one test ==="
+          node --test --experimental-strip-types test/gemini-pkce.test.ts 2>&1 || echo "FAILED with exit code: $?"
+
+      - name: Run all tests
         run: npm test
 
   release:
