@@ -50,17 +50,8 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Show versions
-        run: |
-          bun --version
-          node --version
-          echo "=== Installed packages ==="
-          ls node_modules/.bin/tsx 2>/dev/null || echo "tsx not in .bin"
-
       - name: Run tests
-        run: |
-          bun test test/ 2>&1
-          echo "EXIT CODE: $?"
+        run: npm test
 
   release:
     name: Publish Extension
